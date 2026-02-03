@@ -38,3 +38,8 @@ Thumbs.db
 # Archivos de prueba
 *_traducido.srt
 test*.srt
+
+# PyInstaller
+*.spec
+build/
+dist/
