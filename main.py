@@ -9,6 +9,7 @@ import threading
 import re
 from deep_translator import GoogleTranslator
 import os
+import time
 
 
 class TraductorSRT:
@@ -19,6 +20,7 @@ class TraductorSRT:
         self.callback_progreso = callback_progreso
     
     def parsear_srt(self, contenido):
+        print(f"Parseando SRT, tamaño del contenido: {len(contenido)} caracteres")  # Debug
         patron_subtitulo = re.compile(
             r'(\d+)\s*\n'
             r'([\d:,]+ --> [\d:,]+)\s*\n'
@@ -39,6 +41,7 @@ class TraductorSRT:
                 'texto': texto
             })
         
+        print(f"Subtítulos parseados: {len(subtitulos)}")  # Debug
         return subtitulos
     
     def traducir_texto(self, texto):
@@ -46,41 +49,74 @@ class TraductorSRT:
             return texto
         
         try:
-            lineas = texto.split('\n')
-            lineas_traducidas = []
+            print(f"Traduciendo texto: {texto[:50]}...")  # Debug
             
-            for linea in lineas:
-                if linea.strip():
-                    traduccion = self.traductor.translate(linea)
-                    lineas_traducidas.append(traduccion)
-                else:
-                    lineas_traducidas.append('')
-            
-            return '\n'.join(lineas_traducidas)
+            # Traducir todo el texto de una vez es mucho más rápido
+            # que traducir línea por línea
+            try:
+                traduccion = self.traductor.translate(texto)
+                print(f"Traducción completada")  # Debug
+                time.sleep(0.05)  # Delay reducido para evitar rate limiting
+                return traduccion
+            except Exception as e:
+                print(f"Error en traducción completa, intentando línea por línea: {e}")
+                # Fallback: traducir línea por línea si falla
+                lineas = texto.split('\n')
+                lineas_traducidas = []
+                
+                for i, linea in enumerate(lineas, 1):
+                    if linea.strip():
+                        try:
+                            print(f"Traduciendo línea {i}: {linea[:30]}...")  # Debug
+                            traduccion = self.traductor.translate(linea)
+                            lineas_traducidas.append(traduccion)
+                            time.sleep(0.05)  # Delay reducido
+                        except Exception as e:
+                            print(f"Error traduciendo línea: {e}")
+                            lineas_traducidas.append(linea)  # Mantener original si falla
+                    else:
+                        lineas_traducidas.append('')
+                
+                resultado = '\n'.join(lineas_traducidas)
+                return resultado
         except Exception as e:
+            print(f"Error en traducir_texto: {e}")
+            import traceback
+            traceback.print_exc()
             return texto
     
     def traducir_archivo(self, archivo_entrada, archivo_salida=None):
+        print(f"traducir_archivo: inicio - {archivo_entrada}")  # Debug
         if archivo_salida is None:
             nombre_base = os.path.splitext(archivo_entrada)[0]
             archivo_salida = f"{nombre_base}_traducido.srt"
         
+        print(f"Archivo de salida: {archivo_salida}")  # Debug
+        
         try:
             with open(archivo_entrada, 'r', encoding='utf-8') as f:
                 contenido = f.read()
+            print("Archivo leído con UTF-8")  # Debug
         except UnicodeDecodeError:
+            print("Error UTF-8, intentando latin-1")  # Debug
             with open(archivo_entrada, 'r', encoding='latin-1') as f:
                 contenido = f.read()
         
+        print("Parseando subtítulos...")  # Debug
         subtitulos = self.parsear_srt(contenido)
         total = len(subtitulos)
+        print(f"Total de subtítulos a traducir: {total}")  # Debug
         
         if self.callback_progreso:
+            print("Llamando callback_progreso inicial")  # Debug
             self.callback_progreso(0, total, "Iniciando...")
         
         subtitulos_traducidos = []
+        batch_size = 3  # Procesar 3 subtítulos antes de actualizar progreso
         
         for i, sub in enumerate(subtitulos, 1):
+            print(f"\n--- Subtítulo {i}/{total} ---")  # Debug
+            print(f"Texto original: {sub['texto']}")  # Debug
             texto_traducido = self.traducir_texto(sub['texto'])
             subtitulos_traducidos.append({
                 'numero': sub['numero'],
@@ -88,9 +124,12 @@ class TraductorSRT:
                 'texto': texto_traducido
             })
             
-            if self.callback_progreso:
+            # Actualizar progreso cada batch_size subtítulos o al final
+            if self.callback_progreso and (i % batch_size == 0 or i == total):
+                print(f"Llamando callback_progreso: {i}/{total}")  # Debug
                 self.callback_progreso(i, total, f"Traduciendo {i}/{total}")
         
+        print(f"Escribiendo archivo de salida: {archivo_salida}")  # Debug
         with open(archivo_salida, 'w', encoding='utf-8') as f:
             for sub in subtitulos_traducidos:
                 f.write(f"{sub['numero']}\n")
@@ -98,6 +137,7 @@ class TraductorSRT:
                 f.write(f"{sub['texto']}\n")
                 f.write("\n")
         
+        print(f"Archivo traducido guardado exitosamente")  # Debug
         return archivo_salida
 
 
@@ -105,14 +145,14 @@ class AplicacionTraductor:
     def __init__(self, root):
         self.root = root
         self.root.title("Traductor de Subtítulos SRT")
-        self.root.geometry("700x550")
+        self.root.geometry("700x650")
         self.root.resizable(False, False)
         
         # Configurar estilo moderno
         self.configurar_estilo()
         
         # Variables
-        self.archivo_seleccionado = tk.StringVar()
+        self.archivos_seleccionados = []  # Lista de archivos
         self.idioma_origen = tk.StringVar(value="auto")
         self.idioma_destino = tk.StringVar(value="es")
         self.traduciendo = False
@@ -145,8 +185,8 @@ class AplicacionTraductor:
                        foreground="white",
                        borderwidth=0,
                        focuscolor='none',
-                       padding=12,
-                       font=('Segoe UI', 10, 'bold'))
+                       padding=10,
+                       font=('Segoe UI', 9, 'bold'))
         
         style.map("Primary.TButton",
                  background=[('active', self.secondary_color)])
@@ -194,9 +234,9 @@ class AplicacionTraductor:
         contenido = tk.Frame(card, bg=self.card_color)
         contenido.pack(padx=30, pady=30, fill=tk.BOTH, expand=True)
         
-        # Selección de archivo
+        # Selección de archivos
         archivo_label = tk.Label(contenido,
-                                text="Archivo SRT",
+                                text="Archivos SRT",
                                 font=('Segoe UI', 11, 'bold'),
                                 bg=self.card_color,
                                 fg=self.text_color)
@@ -205,20 +245,38 @@ class AplicacionTraductor:
         archivo_frame = tk.Frame(contenido, bg=self.card_color)
         archivo_frame.pack(fill=tk.X, pady=(0, 20))
         
-        self.archivo_entry = tk.Entry(archivo_frame,
-                                      textvariable=self.archivo_seleccionado,
-                                      font=('Segoe UI', 10),
-                                      relief=tk.FLAT,
-                                      bg="#f8f9fa",
-                                      fg=self.text_color,
-                                      state='readonly')
-        self.archivo_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=10, ipadx=10)
+        # Frame para lista de archivos con scroll
+        lista_frame = tk.Frame(archivo_frame, bg="#f8f9fa", relief=tk.FLAT)
+        lista_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        btn_examinar = ttk.Button(archivo_frame,
-                                 text="Examinar",
-                                 command=self.seleccionar_archivo,
-                                 style="Primary.TButton")
-        btn_examinar.pack(side=tk.RIGHT, padx=(10, 0))
+        scrollbar = tk.Scrollbar(lista_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.lista_archivos = tk.Listbox(lista_frame,
+                                         font=('Segoe UI', 9),
+                                         relief=tk.FLAT,
+                                         bg="#f8f9fa",
+                                         fg=self.text_color,
+                                         height=4,
+                                         yscrollcommand=scrollbar.set)
+        self.lista_archivos.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        scrollbar.config(command=self.lista_archivos.yview)
+        
+        # Frame de botones
+        botones_frame = tk.Frame(archivo_frame, bg=self.card_color)
+        botones_frame.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        btn_agregar = ttk.Button(botones_frame,
+                                text="Agregar",
+                                command=self.seleccionar_archivos,
+                                style="Primary.TButton")
+        btn_agregar.pack(pady=(0, 5))
+        
+        btn_limpiar = ttk.Button(botones_frame,
+                                text="Limpiar",
+                                command=self.limpiar_archivos,
+                                style="Primary.TButton")
+        btn_limpiar.pack()
         
         # Idiomas
         idiomas_frame = tk.Frame(contenido, bg=self.card_color)
@@ -288,30 +346,53 @@ class AplicacionTraductor:
         # Mapa de idiomas
         self.mapa_idiomas = dict(idiomas_origen + idiomas_destino)
         
-        # Progreso
-        self.progreso_frame = tk.Frame(contenido, bg=self.card_color)
-        self.progreso_frame.pack(fill=tk.X, pady=(0, 20))
+        # Progreso - Sección mejorada con altura más grande
+        self.progreso_frame = tk.Frame(contenido, bg=self.card_color, height=100)
+        self.progreso_frame.pack(fill=tk.X, pady=(10, 10))
+        self.progreso_frame.pack_propagate(False)  # Mantener altura fija
         
+        # Etiqueta de estado del archivo actual
+        self.progreso_archivo_label = tk.Label(self.progreso_frame,
+                                              text="Esperando...",
+                                              font=('Segoe UI', 10, 'bold'),
+                                              bg=self.card_color,
+                                              fg=self.text_color,
+                                              anchor='w')
+        self.progreso_archivo_label.pack(fill=tk.X, pady=(8, 5))
+        
+        # Etiqueta de progreso detallado
         self.progreso_label = tk.Label(self.progreso_frame,
-                                       text="",
+                                       text="Listo para traducir",
                                        font=('Segoe UI', 9),
                                        bg=self.card_color,
-                                       fg=self.text_light)
-        self.progreso_label.pack(anchor='w', pady=(0, 8))
+                                       fg=self.text_light,
+                                       anchor='w')
+        self.progreso_label.pack(fill=tk.X, pady=(0, 8))
         
+        # Barra de progreso más grande y visible
         self.barra_progreso = ttk.Progressbar(self.progreso_frame,
                                              mode='determinate',
-                                             length=300)
-        self.barra_progreso.pack(fill=tk.X)
+                                             length=400)
+        self.barra_progreso.pack(fill=tk.X, pady=(0, 8), ipady=8)
         
-        self.progreso_frame.pack_forget()  # Ocultar inicialmente
+        # Etiqueta de porcentaje
+        self.porcentaje_label = tk.Label(self.progreso_frame,
+                                         text="0%",
+                                         font=('Segoe UI', 11, 'bold'),
+                                         bg=self.card_color,
+                                         fg=self.primary_color,
+                                         anchor='center')
+        self.porcentaje_label.pack()
         
-        # Botón traducir
+        # Mostrar siempre el frame de progreso
+        # self.progreso_frame.pack_forget()  # No ocultar
+        
+        # Botón traducir - con más espacio
         self.btn_traducir = ttk.Button(contenido,
-                                      text="Traducir Subtítulos",
+                                      text="⬇ Traducir Subtítulos ⬇",
                                       command=self.iniciar_traduccion,
                                       style="Primary.TButton")
-        self.btn_traducir.pack(pady=(10, 0))
+        self.btn_traducir.pack(pady=(15, 10))
     
     def centrar_ventana(self):
         self.root.update_idletasks()
@@ -321,13 +402,21 @@ class AplicacionTraductor:
         y = (self.root.winfo_screenheight() // 2) - (alto // 2)
         self.root.geometry(f'{ancho}x{alto}+{x}+{y}')
     
-    def seleccionar_archivo(self):
-        archivo = filedialog.askopenfilename(
-            title="Seleccionar archivo SRT",
+    def seleccionar_archivos(self):
+        archivos = filedialog.askopenfilenames(
+            title="Seleccionar archivos SRT",
             filetypes=[("Archivos SRT", "*.srt"), ("Todos los archivos", "*.*")]
         )
-        if archivo:
-            self.archivo_seleccionado.set(archivo)
+        for archivo in archivos:
+            if archivo not in self.archivos_seleccionados:
+                self.archivos_seleccionados.append(archivo)
+                # Mostrar solo el nombre del archivo en la lista
+                nombre_archivo = os.path.basename(archivo)
+                self.lista_archivos.insert(tk.END, nombre_archivo)
+    
+    def limpiar_archivos(self):
+        self.archivos_seleccionados.clear()
+        self.lista_archivos.delete(0, tk.END)
     
     def obtener_codigo_idioma(self, nombre):
         return self.mapa_idiomas.get(nombre, nombre)
@@ -339,21 +428,27 @@ class AplicacionTraductor:
         self.root.update_idletasks()
     
     def iniciar_traduccion(self):
-        if not self.archivo_seleccionado.get():
-            messagebox.showwarning("Advertencia", "Por favor selecciona un archivo SRT")
+        if not self.archivos_seleccionados:
+            messagebox.showwarning("Advertencia", "Por favor selecciona al menos un archivo SRT")
             return
         
-        if not os.path.exists(self.archivo_seleccionado.get()):
-            messagebox.showerror("Error", "El archivo seleccionado no existe")
-            return
+        # Verificar que todos los archivos existan
+        for archivo in self.archivos_seleccionados:
+            if not os.path.exists(archivo):
+                messagebox.showerror("Error", f"El archivo no existe: {os.path.basename(archivo)}")
+                return
         
         if self.traduciendo:
             return
         
+        print("Iniciando traducción...")  # Debug
         self.traduciendo = True
         self.btn_traducir.config(state='disabled', text="Traduciendo...")
-        self.progreso_frame.pack(fill=tk.X, pady=(0, 20))
         self.barra_progreso['value'] = 0
+        self.porcentaje_label.config(text="0%")
+        self.progreso_archivo_label.config(text="Iniciando traducción...")
+        self.progreso_label.config(text="Preparando archivos...")
+        self.root.update()  # Forzar actualización inmediata
         
         # Ejecutar en hilo separado
         thread = threading.Thread(target=self.traducir)
@@ -362,31 +457,94 @@ class AplicacionTraductor:
     
     def traducir(self):
         try:
+            print("Thread de traducción iniciado")  # Debug
             idioma_orig = self.obtener_codigo_idioma(self.combo_origen.get())
             idioma_dest = self.obtener_codigo_idioma(self.combo_destino.get())
+            print(f"Idiomas: {idioma_orig} -> {idioma_dest}")  # Debug
             
-            traductor = TraductorSRT(
-                idioma_origen=idioma_orig,
-                idioma_destino=idioma_dest,
-                callback_progreso=self.actualizar_progreso
-            )
+            total_archivos = len(self.archivos_seleccionados)
+            archivos_traducidos = []
             
-            archivo_salida = traductor.traducir_archivo(self.archivo_seleccionado.get())
+            for idx, archivo_entrada in enumerate(self.archivos_seleccionados, 1):
+                try:
+                    print(f"Procesando archivo {idx}/{total_archivos}: {os.path.basename(archivo_entrada)}")  # Debug
+                    
+                    # Crear nombre de salida: nombre.esp.srt
+                    directorio = os.path.dirname(archivo_entrada)
+                    nombre_base = os.path.splitext(os.path.basename(archivo_entrada))[0]
+                    extension = os.path.splitext(archivo_entrada)[1]
+                    archivo_salida = os.path.join(directorio, f"{nombre_base}.esp{extension}")
+                    
+                    # Variables para cerrar sobre el valor actual de idx
+                    archivo_actual = idx
+                    nombre_archivo = os.path.basename(archivo_entrada)
+                    
+                    # Callback para progreso de cada archivo - usar after() para thread-safety
+                    def callback_progreso(actual, total, mensaje):
+                        try:
+                            progreso_archivo = (actual / total) * 100 if total > 0 else 0
+                            progreso_total = ((archivo_actual - 1) / total_archivos * 100) + (progreso_archivo / total_archivos)
+                            
+                            # Usar after() para actualizar GUI desde thread secundario de forma segura
+                            def actualizar_gui():
+                                try:
+                                    self.barra_progreso['value'] = progreso_total
+                                    self.porcentaje_label.config(text=f"{int(progreso_total)}%")
+                                    self.progreso_archivo_label.config(text=f"Archivo {archivo_actual}/{total_archivos}: {nombre_archivo}")
+                                    self.progreso_label.config(text=mensaje)
+                                except Exception as e:
+                                    print(f"Error actualizando GUI: {e}")
+                            
+                            self.root.after(0, actualizar_gui)
+                        except Exception as e:
+                            print(f"Error en callback_progreso: {e}")
+                    
+                    traductor = TraductorSRT(
+                        idioma_origen=idioma_orig,
+                        idioma_destino=idioma_dest,
+                        callback_progreso=callback_progreso
+                    )
+                    
+                    print(f"Iniciando traducción de {nombre_archivo}...")  # Debug
+                    traductor.traducir_archivo(archivo_entrada, archivo_salida)
+                    archivos_traducidos.append(archivo_salida)
+                    print(f"Archivo {nombre_archivo} traducido exitosamente")  # Debug
+                except Exception as e:
+                    error_msg = f"Error en archivo {os.path.basename(archivo_entrada)}: {str(e)}"
+                    print(error_msg)
+                    import traceback
+                    traceback.print_exc()
+                    self.root.after(0, lambda msg=error_msg: messagebox.showwarning("Error en archivo", msg))
             
-            self.root.after(0, lambda: self.traduccion_completada(archivo_salida))
+            print("Traducción completada, actualizando GUI...")  # Debug
+            self.root.after(0, lambda: self.traduccion_completada(archivos_traducidos))
         except Exception as e:
+            print(f"Error general: {str(e)}")
+            import traceback
+            traceback.print_exc()
             self.root.after(0, lambda: self.traduccion_error(str(e)))
     
-    def traduccion_completada(self, archivo_salida):
+    def traduccion_completada(self, archivos_salida):
+        print("traduccion_completada llamado")  # Debug
         self.traduciendo = False
         self.btn_traducir.config(state='normal', text="Traducir Subtítulos")
         self.barra_progreso['value'] = 100
-        self.progreso_label.config(text="¡Traducción completada!")
+        self.porcentaje_label.config(text="100%")
+        self.progreso_archivo_label.config(text="¡Traducción completada!")
+        self.progreso_label.config(text=f"{len(archivos_salida)} archivo(s) traducido(s) exitosamente")
+        self.root.update()  # Forzar actualización
         
-        messagebox.showinfo(
-            "Éxito",
-            f"Traducción completada correctamente.\n\nArchivo guardado en:\n{archivo_salida}"
-        )
+        total = len(archivos_salida)
+        mensaje = f"Traducción completada correctamente.\n\n{total} archivo(s) traducido(s):\n\n"
+        
+        # Mostrar solo nombres de archivos
+        for archivo in archivos_salida[:5]:  # Mostrar máximo 5
+            mensaje += f"• {os.path.basename(archivo)}\n"
+        
+        if total > 5:
+            mensaje += f"\n... y {total - 5} más"
+        
+        messagebox.showinfo("Éxito", mensaje)
     
     def traduccion_error(self, error):
         self.traduciendo = False
